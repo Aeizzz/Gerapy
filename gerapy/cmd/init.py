@@ -3,7 +3,16 @@ from os.path import join
 
 PROJECTS_FOLDER = 'projects'
 
+
+
 def init(folder):
+    '''
+    初始化项目创建文件夹
+    \-gerapy
+        \-projects
+    :param folder:
+    :return:
+    '''
     if not folder:
         folder = 'gerapy'
     # execute path

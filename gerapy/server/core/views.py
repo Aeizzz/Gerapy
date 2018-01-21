@@ -86,8 +86,11 @@ def client_status(request, client_id):
         # get client object
         client = Client.objects.get(id=client_id)
         try:
-            requests.get(scrapyd_url(client.ip, client.port), timeout=3)
-            return JsonResponse({'result': '1'})
+            r = requests.get(scrapyd_url(client.ip, client.port), timeout=3)
+            if r.status_code == 200:
+                return JsonResponse({'result': '1'})
+            else:
+                return JsonResponse({'message': 'Connect Error'}, status=500)
         except ConnectionError:
             return JsonResponse({'message': 'Connect Error'}, status=500)
 
