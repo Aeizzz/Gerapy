@@ -1,6 +1,7 @@
+import sys
+import traceback
 import json, os, requests, time, pytz, pymongo, string
 from shutil import move, copy, rmtree
-from scrapyd_api import ScrapydAPI
 from requests.exceptions import ConnectionError
 from os.path import join, exists
 from django.shortcuts import render
@@ -11,10 +12,10 @@ from django.utils import timezone
 from gerapy.server.core.response import JsonResponse
 from gerapy.cmd.init import PROJECTS_FOLDER
 from gerapy.server.server.settings import TIME_ZONE
-from gerapy.server.core.models import Client, Project, Deploy, Monitor
+from gerapy.server.core.models import Client, Project, Deploy, Monitor, Task
 from gerapy.server.core.build import build_project, find_egg
 from gerapy.server.core.utils import IGNORES, is_valid_name, copy_tree, TEMPLATES_DIR, TEMPLATES_TO_RENDER, \
-    render_template, get_traceback, scrapyd_url, log_url, get_tree
+    render_template, get_traceback, scrapyd_url, log_url, get_tree, get_scrapyd
 
 
 def index(request):
@@ -129,6 +130,12 @@ def client_remove(request, client_id):
     :return: json
     """
     if request.method == 'POST':
+        client = Client.objects.get(id=client_id)
+        # delete deploy
+        Deploy.objects.filter(client=client).delete()
+        # delete task
+        Task.objects.filter(client_id=client_id).delete()
+        # delete client
         Client.objects.filter(id=client_id).delete()
         return JsonResponse({'result': '1'})
 
@@ -143,7 +150,7 @@ def spider_list(request, client_id, project_name):
     """
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+        scrapyd = get_scrapyd(client)
         try:
             spiders = scrapyd.list_spiders(project_name)
             spiders = [{'name': spider, 'id': index + 1} for index, spider in enumerate(spiders)]
@@ -163,7 +170,7 @@ def spider_start(request, client_id, project_name, spider_name):
     """
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+        scrapyd = get_scrapyd(client)
         try:
             job = scrapyd.schedule(project_name, spider_name)
             return JsonResponse({'job': job})
@@ -180,7 +187,7 @@ def project_list(request, client_id):
     """
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+        scrapyd = get_scrapyd(client)
         try:
             projects = scrapyd.list_projects()
             return JsonResponse(projects)
@@ -266,12 +273,19 @@ def project_remove(request, project_name):
     :return: result of remove
     """
     if request.method == 'POST':
+        # delete deployments
+        project = Project.objects.get(name=project_name)
+        Deploy.objects.filter(project=project).delete()
+        # delete project
+        result = Project.objects.filter(name=project_name).delete()
+        # delete scheduler
+        Task.objects.filter(project_name=project).delete()
+        # get project path
         path = join(os.path.abspath(os.getcwd()), PROJECTS_FOLDER)
         project_path = join(path, project_name)
         # delete project file tree
-        rmtree(project_path)
-        # delete project
-        result = Project.objects.filter(name=project_name).delete()
+        if exists(project_path):
+            rmtree(project_path)
         return JsonResponse({'result': result})
 
 
@@ -287,7 +301,7 @@ def project_version(request, client_id, project_name):
         # get client and project model
         client = Client.objects.get(id=client_id)
         project = Project.objects.get(name=project_name)
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+        scrapyd = get_scrapyd(client)
         # if deploy info exists in db, return it
         if Deploy.objects.filter(client=client, project=project):
             deploy = Deploy.objects.get(client=client, project=project)
@@ -321,22 +335,21 @@ def project_deploy(request, client_id, project_name):
         project_path = join(path, project_name)
         # find egg file
         egg = find_egg(project_path)
+        if not egg:
+            return JsonResponse({'message': 'egg not found'}, status=500)
         egg_file = open(join(project_path, egg), 'rb')
         # get client and project model
         client = Client.objects.get(id=client_id)
         project = Project.objects.get(name=project_name)
         # execute deploy operation
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
-        try:
-            scrapyd.add_version(project_name, int(time.time()), egg_file.read())
-            # update deploy info
-            deployed_at = timezone.now()
-            Deploy.objects.filter(client=client, project=project).delete()
-            deploy, result = Deploy.objects.update_or_create(client=client, project=project, deployed_at=deployed_at,
-                                                             description=project.description)
-            return JsonResponse(model_to_dict(deploy))
-        except Exception:
-            return JsonResponse({'message': get_traceback()}, status=500)
+        scrapyd = get_scrapyd(client)
+        scrapyd.add_version(project_name, int(time.time()), egg_file.read())
+        # update deploy info
+        deployed_at = timezone.now()
+        Deploy.objects.filter(client=client, project=project).delete()
+        deploy, result = Deploy.objects.update_or_create(client=client, project=project, deployed_at=deployed_at,
+                                                         description=project.description)
+        return JsonResponse(model_to_dict(deploy))
 
 
 def project_build(request, project_name):
@@ -378,6 +391,8 @@ def project_build(request, project_name):
         description = data['description']
         build_project(project_name)
         egg = find_egg(project_path)
+        if not egg:
+            return JsonResponse({'message': 'egg not found'}, status=500)
         # update built_at info
         built_at = timezone.now()
         # if project does not exists in db, create it
@@ -406,8 +421,9 @@ def project_generate(request, project_name):
     if request.method == 'POST':
         # get configuration
         configuration = Project.objects.get(name=project_name).configuration
+        if not configuration:
+            return JsonResponse({'message': 'Invalid configuration'}, status=500)
         configuration = json.loads(configuration)
-        
         if not is_valid_name(project_name):
             return JsonResponse({'message': 'Invalid project name'}, status=500)
         # remove original project dir
@@ -453,8 +469,9 @@ def project_file_read(request):
     if request.method == 'POST':
         data = json.loads(request.body)
         path = join(data['path'], data['label'])
-        with open(path, 'r') as f:
-            return HttpResponse(f.read())
+        # 二进制打开文件
+        with open(path, 'rb') as f:
+            return HttpResponse(f.read().decode('utf-8'))
 
 
 def project_file_update(request):
@@ -522,7 +539,7 @@ def job_list(request, client_id, project_name):
     """
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
-        scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+        scrapyd = get_scrapyd(client)
         try:
             result = scrapyd.list_jobs(project_name)
             jobs = []
@@ -554,11 +571,14 @@ def job_log(request, client_id, project_name, spider_name, job_id):
             # get last 1000 bytes of log
             response = requests.get(url, timeout=5, headers={
                 'Range': 'bytes=-1000'
-            })
+            }, auth=(client.username, client.password) if client.auth else None)
+            # Get encoding
+            encoding = response.apparent_encoding
             # log not found
             if response.status_code == 404:
                 return JsonResponse({'message': 'Log Not Found'}, status=404)
-            text = response.text
+            # bytes to string
+            text = response.content.decode(encoding, errors='replace')
             return HttpResponse(text)
         except requests.ConnectionError:
             return JsonResponse({'message': 'Load Log Error'}, status=500)
@@ -576,7 +596,7 @@ def job_cancel(request, client_id, project_name, job_id):
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
         try:
-            scrapyd = ScrapydAPI(scrapyd_url(client.ip, client.port))
+            scrapyd = get_scrapyd(client)
             result = scrapyd.cancel(project_name, job_id)
             return JsonResponse(result)
         except ConnectionError:
@@ -629,3 +649,79 @@ def monitor_create(request):
         data['configuration'] = json.dumps(data['configuration'])
         monitor = Monitor.objects.create(**data)
         return JsonResponse(model_to_dict(monitor))
+
+
+def task_create(request):
+    """
+    add task
+    :param request: request object
+    :return: Bool
+    """
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        task = Task.objects.create(clients=json.dumps(data.get('clients')),
+                                   project=data.get('project'),
+                                   name=data.get('name'),
+                                   spider=data.get('spider'),
+                                   trigger=data.get('trigger'),
+                                   configuration=json.dumps(data.get('configuration')))
+        return JsonResponse({'result': '1', 'data': model_to_dict(task)})
+
+
+def task_update(request, task_id):
+    """
+    update task info
+    :param request: request object
+    :param task_id: task id
+    :return: json
+    """
+    if request.method == 'POST':
+        task = Task.objects.filter(id=task_id)
+        data = json.loads(request.body)
+        print(data)
+        data['clients'] = json.dumps(data.get('clients'))
+        data['configuration'] = json.dumps(data.get('configuration'))
+        print(data)
+        task.update(**data)
+        return JsonResponse(model_to_dict(Task.objects.get(id=task_id)))
+
+
+def task_remove(request, task_id):
+    """
+    remove task by task_id
+    :param request:
+    :return:
+    """
+    if request.method == 'POST':
+        try:
+            Task.objects.filter(id=task_id).delete()
+            return JsonResponse({'result': '1'})
+        except:
+            return JsonResponse({'result': '0'})
+
+
+def task_info(request, task_id):
+    """
+    get task info
+    :param request: request object
+    :param task_id: task id
+    :return: json
+    """
+    if request.method == 'GET':
+        task = Task.objects.get(id=task_id)
+        data = model_to_dict(task)
+        print(data)
+        data['clients'] = json.loads(data.get('clients'))
+        data['configuration'] = json.loads(data.get('configuration'))
+        return JsonResponse({'data': data})
+
+
+def task_index(request):
+    """
+    get all tasks
+    :param request:
+    :return:
+    """
+    if request.method == 'GET':
+        tasks = Task.objects.values()
+        return JsonResponse({'result': '1', 'data': tasks})

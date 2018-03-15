@@ -2,10 +2,11 @@
 Usage:
   gerapy init [--folder=<folder>]
   gerapy migrate
+  gerapy makemigrations
   gerapy createsuperuser
   gerapy runserver [<host:port>]
-  gerapy makemigrations
-
+  gerapy loaddata <source>
+  gerapy dumpdata [<appname>]
 Options:
   -h --help
   -v --version
@@ -20,7 +21,7 @@ def cmd():
     arguments = docopt(__doc__, version=version())
     
     if arguments.get('init'):
-        # init folder
+        # nit folder
         init(arguments.get('--folder'))
     else:
         # Call django cmd

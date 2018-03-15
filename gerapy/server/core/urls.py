@@ -33,4 +33,9 @@ urlpatterns = [
     url(r'^api/monitor/create', views.monitor_create, name='monitor_create'),
     url(r'^api/monitor/db/list', views.monitor_db_list, name='monitor_db_list'),
     url(r'^api/monitor/collection/list', views.monitor_collection_list, name='monitor_collection_list'),
+    url(r'^api/task/$', views.task_index, name='task_index'),
+    url(r'^api/task/create', views.task_create, name='task_create'),
+    url(r'^api/task/(\d+)/update', views.task_update, name='task_update'),
+    url(r'^api/task/(\d+)/info', views.task_info, name='task_info'),
+    url(r'^api/task/(\d+)/remove', views.task_remove, name='task_remove'),
 ]
